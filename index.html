@@ -936,7 +936,7 @@ const ENEMY_TYPES = [
   { id:'sniper',   name:'SNIPER',     color:'#ffff00', hp:40,  spd:0.5, size:10, score:15,  dmg:0,  shoot:true,  pattern:'strafe', fireRate:100, bulletSpd:11, bulletDmg:32 },
   { id:'bomber',   name:'BOMBER',     color:'#ff6600', hp:50,  spd:1.1, size:13, score:18,  dmg:45, shoot:false, pattern:'kamikaze' },
   { id:'elite',    name:'ELITE',      color:'#cc00ff', hp:200, spd:1.1, size:16, score:40,  dmg:22, shoot:true,  pattern:'orbit', fireRate:35,  bulletSpd:6.5, bulletDmg:22 },
-  { id:'boss',     name:'BOSS',       color:'#ff0066', hp:800, spd:0.7, size:32, score:200, dmg:30, shoot:true,  pattern:'boss',  fireRate:22,  bulletSpd:7,   bulletDmg:26, isBoss:true },
+  { id:'boss',     name:'BOSS',       color:'#ff0066', hp:1800,spd:0.7, size:32, score:200, dmg:30, shoot:true,  pattern:'boss',  fireRate:22,  bulletSpd:7,   bulletDmg:26, isBoss:true },
   { id:'swarm',    name:'SWARM',      color:'#88ff44', hp:10,  spd:2.3, size:7,  score:3,   dmg:8,  shoot:false, pattern:'swarm' },
 ];
 
@@ -1212,12 +1212,19 @@ function spawnEnemy(typeId, x, y) {
     x = side===0 ? rnd(-20,W+20) : side===1 ? W+20 : side===2 ? rnd(-20,W+20) : -20;
     y = side===0 ? -20 : side===1 ? rnd(0,H) : side===2 ? H+20 : rnd(0,H);
   }
-  const scaleHp = 1 + (game.wave-1)*0.15;
+  const scaleHp  = 1 + (game.wave-1)*0.25;   // +25% HP per wave (was 15%)
+  const scaleDmg = 1 + (game.wave-1)*0.12;   // +12% damage per wave (new)
+  // Bosses scale even harder
+  const isB = t.isBoss;
+  const hpMult  = isB ? scaleHp  * (1 + (game.wave-1)*0.15) : scaleHp;
+  const dmgMult = isB ? scaleDmg * (1 + (game.wave-1)*0.08) : scaleDmg;
   return {
     ...t,
     x, y, vx:0, vy:0,
-    maxHp: t.hp * scaleHp,
-    hp: t.hp * scaleHp,
+    maxHp: t.hp * hpMult,
+    hp:    t.hp * hpMult,
+    dmg:   Math.round(t.dmg    * dmgMult),
+    bulletDmg: t.bulletDmg ? Math.round(t.bulletDmg * dmgMult) : undefined,
     fireTimer: Math.random()*60,
     wobble: 0, wobbleDir: 1,
     orbitAngle: Math.random()*Math.PI*2,
@@ -1225,6 +1232,9 @@ function spawnEnemy(typeId, x, y) {
     slowTimer: 0,
     dead: false,
     flash: 0,
+    // Boss attack phase tracker
+    bossPhase: 0,
+    bossPhaseTimer: 0,
   };
 }
 
@@ -1465,15 +1475,44 @@ function update() {
     if(e.shoot) {
       e.fireTimer-=slowMult;
       if(e.fireTimer<=0) {
-        e.fireTimer=e.fireRate*(slowMult<1?2:1);
-        const angle=Math.atan2(p.y-e.y,p.x-e.x)+(e.pattern==='boss'?rnd(-0.3,0.3):0);
-        g.eBullets.push({x:e.x,y:e.y,vx:Math.cos(angle)*e.bulletSpd,vy:Math.sin(angle)*e.bulletSpd,dmg:e.bulletDmg,r:5,life:120,color:e.color});
-        if(e.isBoss && e.hp<e.maxHp*0.5) {
-          // Enrage: spread shot
-          for(let a=-1;a<=1;a+=0.5) {
-            const a2=angle+a*0.4;
-            g.eBullets.push({x:e.x,y:e.y,vx:Math.cos(a2)*e.bulletSpd*1.2,vy:Math.sin(a2)*e.bulletSpd*1.2,dmg:e.bulletDmg,r:5,life:100,color:'#ff0066'});
+        if(e.isBoss) {
+          // ── Boss 3-pattern attack ──
+          // Phase cycles: 0=spread6, 1=homing3, 2=normal. Timer picks next.
+          e.bossPhaseTimer = (e.bossPhaseTimer||0) + 1;
+          if(e.bossPhaseTimer > 3) { e.bossPhase = (e.bossPhase+1)%3; e.bossPhaseTimer=0; }
+
+          const baseAngle = Math.atan2(p.y-e.y, p.x-e.x);
+          const enraged = e.hp < e.maxHp*0.5;
+          const rateBoost = enraged ? 0.6 : 1;
+          e.fireTimer = e.fireRate * rateBoost * (slowMult<1?2:1);
+
+          if(e.bossPhase===0) {
+            // 6連射拡散弾（扇状）
+            const spread = enraged ? Math.PI*1.2 : Math.PI*0.9;
+            for(let i=0;i<6;i++) {
+              const a = baseAngle - spread/2 + spread/5*i;
+              g.eBullets.push({x:e.x,y:e.y, vx:Math.cos(a)*e.bulletSpd, vy:Math.sin(a)*e.bulletSpd,
+                dmg:e.bulletDmg*0.8, r:6, life:130, color:'#ff6600', homing:false});
+            }
+          } else if(e.bossPhase===1) {
+            // 3連射ホーミング弾
+            for(let i=0;i<3;i++) {
+              const offsetAngle = baseAngle + (i-1)*0.35;
+              g.eBullets.push({x:e.x,y:e.y, vx:Math.cos(offsetAngle)*e.bulletSpd*0.8, vy:Math.sin(offsetAngle)*e.bulletSpd*0.8,
+                dmg:e.bulletDmg*1.1, r:7, life:200, color:'#ff00cc',
+                homing:true, speed:e.bulletSpd*0.8});
+            }
+          } else {
+            // 通常弾（速め・高ダメージ）
+            const jitter = enraged ? rnd(-0.25,0.25) : rnd(-0.12,0.12);
+            g.eBullets.push({x:e.x,y:e.y, vx:Math.cos(baseAngle+jitter)*e.bulletSpd*1.4, vy:Math.sin(baseAngle+jitter)*e.bulletSpd*1.4,
+              dmg:e.bulletDmg*1.3, r:8, life:120, color:'#ff0066', homing:false});
           }
+        } else {
+          // 通常敵の射撃
+          e.fireTimer=e.fireRate*(slowMult<1?2:1);
+          const angle=Math.atan2(p.y-e.y,p.x-e.x);
+          g.eBullets.push({x:e.x,y:e.y,vx:Math.cos(angle)*e.bulletSpd,vy:Math.sin(angle)*e.bulletSpd,dmg:e.bulletDmg,r:5,life:120,color:e.color});
         }
       }
     }
@@ -1526,6 +1565,12 @@ function update() {
 
   // Enemy bullets
   g.eBullets.forEach(b => {
+    // Homing tracking (boss homing bullets)
+    if(b.homing) {
+      const dx2=p.x-b.x, dy2=p.y-b.y, dd=Math.hypot(dx2,dy2)||1;
+      b.vx = lerp(b.vx, dx2/dd*b.speed, 0.04);
+      b.vy = lerp(b.vy, dy2/dd*b.speed, 0.04);
+    }
     b.x+=b.vx; b.y+=b.vy; b.life--;
     if(b.life<=0||b.x<0||b.x>W||b.y<0||b.y>H){b.dead=true;return;}
     if(!p.invincible && dist(b,p)<b.r+p.r) {
